@@ -1,0 +1,10 @@
+bin/
+obj/
+uploads/
+Tests/
+docs/
+scripts/
+*.http
+*.user
+.DS_Store
+appsettings.Development.json
