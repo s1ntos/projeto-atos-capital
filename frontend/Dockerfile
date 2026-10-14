@@ -3,7 +3,7 @@ FROM node:22-alpine AS build
 WORKDIR /app
 
 # URL pública da API, injetada em tempo de build pelo Vite (import.meta.env.VITE_API_URL)
-ARG VITE_API_URL
+ARG VITE_API_URL=https://api.atos.zenixcode.cloud
 ENV VITE_API_URL=${VITE_API_URL}
 
 COPY package.json package-lock.json ./
