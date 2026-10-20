@@ -4,7 +4,10 @@ using backend.Data.Repositories;
 using backend.Enums;
 using backend.Events;
 using backend.Models;
+using backend.Seguranca;
 using backend.Services;
+using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -42,6 +45,23 @@ builder.Services.AddCors(options =>
 
 // Serviços da Aplicação
 builder.Services.AddScoped<AuthService>();
+builder.Services.AddSingleton<IPasswordHasher<Usuario>, PasswordHasher<Usuario>>();
+builder.Services.AddSingleton<SenhaService>();
+builder.Services.AddLoginRateLimit(builder.Configuration); // limite de tentativas em POST /api/Auth/login
+builder.Services.Configure<SeedOptions>(builder.Configuration.GetSection(SeedOptions.Secao));
+
+// Atrás de proxy reverso (Coolify/Traefik) o IP do cliente vem em X-Forwarded-For.
+// Só habilitar quando a API não é alcançável sem passar pelo proxy; ForwardLimit=1 usa apenas o último salto.
+if (builder.Configuration.GetValue<bool>("ForwardedHeaders:Habilitado"))
+{
+    builder.Services.Configure<ForwardedHeadersOptions>(options =>
+    {
+        options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+        options.ForwardLimit = 1;
+        options.KnownNetworks.Clear();
+        options.KnownProxies.Clear();
+    });
+}
 builder.Services.AddScoped<RelatorioService>();
 builder.Services.AddEventosWebhooks(builder.Configuration); // RF06: Channel + EventoService + WebhookDispatcher (Events/)
 builder.Services.AddAnexos(builder.Configuration);          // RF11: AnexosOptions + ArquivoService (uploads NÃO são static files)
@@ -101,6 +121,11 @@ builder.Services.AddSwaggerGen(c =>
 
 var app = builder.Build();
 
+if (app.Configuration.GetValue<bool>("ForwardedHeaders:Habilitado"))
+{
+    app.UseForwardedHeaders();
+}
+
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -115,6 +140,7 @@ app.UseHttpsRedirection();
 
 // CORS precisa vir antes da autenticação/autorização
 app.UseCors(PoliticaCorsFrontend);
+app.UseRateLimiter();
 
 // Ativa Autenticação e Autorização
 app.UseAuthentication();
@@ -162,30 +188,19 @@ using (var scope = app.Services.CreateScope())
         gruposEmpresas.SalvarAlteracoes();
     }
 
-    // Garante a criação de cada usuário de teste, checando por e-mail antes de inserir (idempotente)
-    void GarantirUsuario(string nome, string email, string idExterno, PapelEnum papel, int grupoEmpresaId)
+    // Senhas: remove qualquer valor em texto puro deixado por seeds antigos (esses usuários ficam só com SSO
+    // até receberem senha nova), cria os usuários de teste apenas quando Seed:UsuariosDeTeste = true
+    // (desenvolvimento) e o admin inicial de produção a partir de Seed:AdminEmail/AdminSenha.
+    var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("Seed");
+    var senhas = scope.ServiceProvider.GetRequiredService<SenhaService>();
+    var seedOptions = app.Configuration.GetSection(SeedOptions.Secao).Get<SeedOptions>() ?? new SeedOptions();
+
+    UsuarioSeeder.ZerarSenhasEmTextoPuro(usuarios, logger);
+    if (seedOptions.UsuariosDeTeste)
     {
-        if (!usuarios.ObterTodos().Any(u => u.Email == email))
-        {
-            usuarios.Add(new Usuario
-            {
-                Nome = nome,
-                Email = email,
-                SenhaHash = "123456",
-                IdExterno = idExterno,
-                Papel = papel,
-                GrupoEmpresaId = grupoEmpresaId
-            });
-        }
+        UsuarioSeeder.SeedUsuariosDeTeste(usuarios, senhas, seedOptions, grupo.Id, grupoNortec.Id, logger);
     }
-
-    GarantirUsuario("Admin Atos", "admin@atos.com", "USR-ADM-001", PapelEnum.ADMIN, grupo.Id);
-    GarantirUsuario("Cliente Teste", "cliente@atos.com", "USR-CLI-001", PapelEnum.CLIENTE, grupo.Id);
-    GarantirUsuario("Agente Atos", "agente@atos.com", "USR-AGT-001", PapelEnum.AGENTE, grupo.Id);
-    GarantirUsuario("Supervisor Atos", "supervisor@atos.com", "USR-SUP-001", PapelEnum.SUPERVISOR, grupo.Id);
-    GarantirUsuario("Cliente Nortec", "cliente@nortec.com", "USR-CLI-002", PapelEnum.CLIENTE, grupoNortec.Id);
-
-    usuarios.SalvarAlteracoes();
+    UsuarioSeeder.SeedAdminInicial(usuarios, senhas, seedOptions, grupo.Id, logger);
 
     // RF07 — Regras de SLA padrão (idempotente): Plataforma x Acesso/Erro/Dúvida x 4 prioridades
     DataSeeder.SeedSlaCategorias(slaCategorias);

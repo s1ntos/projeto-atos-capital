@@ -11,6 +11,7 @@ using backend.DTOs;
 using backend.Enums;
 using backend.Events;
 using backend.Models;
+using backend.Seguranca;
 using backend.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
@@ -21,7 +22,9 @@ using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.IdentityModel.Tokens;
 using Xunit;
 
@@ -38,6 +41,9 @@ public sealed class ApiRegressionTests : IAsyncLifetime
     private WebApplication _app = null!;
     private HttpClient _http = null!;
 
+    private const string SenhaTeste = "Senha-Teste-123";
+    private const int LimiteLoginPorMinuto = 30;
+
     public async Task InitializeAsync()
     {
         await _connection.OpenAsync();
@@ -50,13 +56,18 @@ public sealed class ApiRegressionTests : IAsyncLifetime
             ["Jwt:Key"] = key,
             ["Jwt:Issuer"] = "testes",
             ["Jwt:Audience"] = "testes",
-            ["Anexos:Diretorio"] = _uploads
+            ["Anexos:Diretorio"] = _uploads,
+            ["Auth:Login:MaxTentativasPorJanela"] = LimiteLoginPorMinuto.ToString(),
+            ["Auth:Login:JanelaSegundos"] = "60"
         });
         builder.Services.AddControllers().AddApplicationPart(typeof(AuthController).Assembly)
             .AddJsonOptions(options => options.JsonSerializerOptions.ReferenceHandler = ReferenceHandler.IgnoreCycles);
         builder.Services.AddDbContext<AppDbContext>(options => options.UseSqlite(_connection));
         builder.Services.AddRepositories();
         builder.Services.AddScoped<AuthService>();
+        builder.Services.AddSingleton<IPasswordHasher<Usuario>, PasswordHasher<Usuario>>();
+        builder.Services.AddSingleton<SenhaService>();
+        builder.Services.AddLoginRateLimit(builder.Configuration);
         builder.Services.AddScoped<RelatorioService>();
         builder.Services.AddAnexos(builder.Configuration);
         builder.Services.Configure<SlaOptions>(builder.Configuration.GetSection(SlaOptions.Secao));
@@ -70,6 +81,7 @@ public sealed class ApiRegressionTests : IAsyncLifetime
                 IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key))
             });
         _app = builder.Build();
+        _app.UseRateLimiter();
         _app.UseAuthentication();
         _app.UseAuthorization();
         _app.MapControllers();
@@ -78,12 +90,21 @@ public sealed class ApiRegressionTests : IAsyncLifetime
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
             await db.Database.EnsureCreatedAsync();
             var grupo = new GrupoEmpresa { Nome = "Grupo A" };
+            var senhas = scope.ServiceProvider.GetRequiredService<SenhaService>();
+            Usuario ComSenha(Usuario u) { u.SenhaHash = senhas.GerarHash(u, SenhaTeste); return u; }
             db.Usuarios.AddRange(
-                new Usuario { Email = "cliente@test.invalid", Nome = "Cliente", Papel = PapelEnum.CLIENTE, GrupoEmpresa = grupo },
-                new Usuario { Email = "admin@test.invalid", Nome = "Admin", Papel = PapelEnum.ADMIN, GrupoEmpresa = grupo },
-                new Usuario { Email = "agente@test.invalid", Nome = "Agente", Papel = PapelEnum.AGENTE, GrupoEmpresa = grupo },
-                new Usuario { Email = "outro@test.invalid", Nome = "Outro", Papel = PapelEnum.CLIENTE, GrupoEmpresa = new GrupoEmpresa { Nome = "Grupo B" } });
+                ComSenha(new Usuario { Email = "cliente@test.invalid", Nome = "Cliente", Papel = PapelEnum.CLIENTE, GrupoEmpresa = grupo }),
+                ComSenha(new Usuario { Email = "admin@test.invalid", Nome = "Admin", Papel = PapelEnum.ADMIN, GrupoEmpresa = grupo }),
+                ComSenha(new Usuario { Email = "agente@test.invalid", Nome = "Agente", Papel = PapelEnum.AGENTE, GrupoEmpresa = grupo }),
+                ComSenha(new Usuario { Email = "outro@test.invalid", Nome = "Outro", Papel = PapelEnum.CLIENTE, GrupoEmpresa = new GrupoEmpresa { Nome = "Grupo B" } }),
+                // Usuário vindo do SSO: sem senha, não pode entrar pelo login por senha.
+                new Usuario { Email = "sso@test.invalid", Nome = "Sso", Papel = PapelEnum.CLIENTE, GrupoEmpresa = grupo, SenhaHash = string.Empty },
+                // Resquício de seed antigo com senha em texto puro: deve ser zerado e nunca aceito.
+                new Usuario { Email = "legado@test.invalid", Nome = "Legado", Papel = PapelEnum.CLIENTE, GrupoEmpresa = grupo, SenhaHash = "123456" });
             await db.SaveChangesAsync();
+            var repositorioUsuarios = scope.ServiceProvider.GetRequiredService<IBaseRepository<Usuario>>();
+            Assert.Equal(1, UsuarioSeeder.ZerarSenhasEmTextoPuro(repositorioUsuarios, NullLogger.Instance));
+            Assert.Equal(0, UsuarioSeeder.ZerarSenhasEmTextoPuro(repositorioUsuarios, NullLogger.Instance));
             var sla = scope.ServiceProvider.GetRequiredService<IBaseRepository<SLACategoria>>();
             Assert.Equal(12, DataSeeder.SeedSlaCategorias(sla));
             Assert.Equal(0, DataSeeder.SeedSlaCategorias(sla));
@@ -129,7 +150,7 @@ public sealed class ApiRegressionTests : IAsyncLifetime
     public async Task AutorizacaoIsolaGruposENotasInternas()
     {
         await Exigir(await _http.GetAsync("/api/Chamados"), HttpStatusCode.Unauthorized);
-        await Exigir(await _http.PostAsJsonAsync("/api/Auth/login", new LoginDto("ausente@test.invalid")), HttpStatusCode.Unauthorized);
+        await Exigir(await _http.PostAsJsonAsync("/api/Auth/login", new LoginDto("ausente@test.invalid", SenhaTeste)), HttpStatusCode.Unauthorized);
         var id = await CriarChamado();
         await Exigir(await _http.GetAsync("/api/Relatorios/resumo"), HttpStatusCode.Forbidden);
         await Exigir(await _http.PostAsJsonAsync($"/api/Chamados/{id}/interacoes",
@@ -254,9 +275,47 @@ public sealed class ApiRegressionTests : IAsyncLifetime
         Assert.All(categorias, c => Assert.Equal(4, c.GetProperty("prioridades").GetArrayLength()));
     }
 
+    [Fact]
+    public async Task LoginExigeSenhaCorretaENaoRevelaQuaisEmailsExistem()
+    {
+        var senhaErrada = await _http.PostAsJsonAsync("/api/Auth/login", new LoginDto("cliente@test.invalid", "senha-errada-123"));
+        await Exigir(senhaErrada, HttpStatusCode.Unauthorized);
+        var emailInexistente = await _http.PostAsJsonAsync("/api/Auth/login", new LoginDto("ninguem@test.invalid", SenhaTeste));
+        await Exigir(emailInexistente, HttpStatusCode.Unauthorized);
+        Assert.Equal(await senhaErrada.Content.ReadAsStringAsync(), await emailInexistente.Content.ReadAsStringAsync());
+        Assert.Contains(AuthController.MensagemCredenciaisInvalidas, await senhaErrada.Content.ReadAsStringAsync());
+
+        // Sem senha (SSO) e senha legada em texto puro: nunca entram pelo login por senha.
+        await Exigir(await _http.PostAsJsonAsync("/api/Auth/login", new LoginDto("sso@test.invalid", "")), HttpStatusCode.Unauthorized);
+        await Exigir(await _http.PostAsJsonAsync("/api/Auth/login", new LoginDto("sso@test.invalid", SenhaTeste)), HttpStatusCode.Unauthorized);
+        await Exigir(await _http.PostAsJsonAsync("/api/Auth/login", new LoginDto("legado@test.invalid", "123456")), HttpStatusCode.Unauthorized);
+
+        // E-mail com maiúsculas/espaços é normalizado; a resposta nunca traz o hash.
+        var ok = await _http.PostAsJsonAsync("/api/Auth/login", new LoginDto("  Cliente@Test.Invalid ", SenhaTeste));
+        await Exigir(ok, HttpStatusCode.OK);
+        var corpo = await ok.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("senhaHash", corpo, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("\"token\"", corpo);
+    }
+
+    [Fact]
+    public async Task LoginLimitaTentativasPorIp()
+    {
+        for (var i = 0; i < LimiteLoginPorMinuto; i++)
+        {
+            await Exigir(await _http.PostAsJsonAsync("/api/Auth/login", new LoginDto("cliente@test.invalid", "senha-errada-123")), HttpStatusCode.Unauthorized);
+        }
+        // Mesmo com a senha certa, o IP estourou a janela.
+        var bloqueado = await _http.PostAsJsonAsync("/api/Auth/login", new LoginDto("cliente@test.invalid", SenhaTeste));
+        await Exigir(bloqueado, HttpStatusCode.TooManyRequests);
+        Assert.Contains("Muitas tentativas", await bloqueado.Content.ReadAsStringAsync());
+        // Outras rotas não são afetadas pelo limite do login.
+        await Exigir(await _http.GetAsync("/api/Auth/me"), HttpStatusCode.Unauthorized);
+    }
+
     private async Task Login(string usuario)
     {
-        var response = await _http.PostAsJsonAsync("/api/Auth/login", new LoginDto(usuario + "@test.invalid"));
+        var response = await _http.PostAsJsonAsync("/api/Auth/login", new LoginDto(usuario + "@test.invalid", SenhaTeste));
         await Exigir(response, HttpStatusCode.OK);
         var token = await response.Content.ReadFromJsonAsync<TokenResponseDto>();
         _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token!.Token);

@@ -39,6 +39,12 @@ export class ApiError extends Error {
 
 interface RequestOptions extends Omit<RequestInit, 'body'> {
   body?: BodyInit | object | number | string | boolean | null;
+  /**
+   * Não limpar a sessão nem redirecionar para /login quando a API responder 401.
+   * Usado pelas chamadas de autenticação (login/SSO), onde 401 significa "credenciais inválidas"
+   * e precisa chegar ao formulário como erro, não como sessão expirada.
+   */
+  semRedirecionamento401?: boolean;
 }
 
 function isFormData(body: RequestOptions['body']): body is FormData {
@@ -70,10 +76,10 @@ function extractMessage(data: unknown, fallback: string): string {
 
 /**
  * Camada única de chamadas HTTP da aplicação.
- * 401 → limpa a sessão e redireciona para /sso (não há tela de login própria). 403/409 → notifica via toast com a mensagem da API.
+ * 401 → limpa a sessão e redireciona para /login (exceto com semRedirecionamento401). 403/409 → notifica via toast com a mensagem da API.
  */
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { body, headers, ...rest } = options;
+  const { body, headers, semRedirecionamento401, ...rest } = options;
   const finalHeaders = new Headers(headers);
 
   const token = getToken();
@@ -97,9 +103,9 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     throw new ApiError('Não foi possível conectar ao servidor.', 0);
   }
 
-  if (response.status === 401) {
+  if (response.status === 401 && !semRedirecionamento401) {
     clearToken();
-    window.location.assign('/sso');
+    window.location.assign('/login');
     throw new ApiError('Sessão expirada.', 401);
   }
 

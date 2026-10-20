@@ -75,7 +75,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     clearToken();
     setTokenState(null);
     setUser(null);
-    navigate('/sso', { replace: true });
+    navigate('/login', { replace: true });
   }, [navigate]);
 
   const value = useMemo<AuthContextValue>(
