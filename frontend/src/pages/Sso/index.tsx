@@ -1,4 +1,5 @@
-import { Alert, Box, CircularProgress, Typography } from '@mui/material';
+import { Alert, Box, Button, CircularProgress, Typography } from '@mui/material';
+import { Link as RouterLink } from 'react-router-dom';
 import { useTheme } from '@mui/material/styles';
 import { useMediaQuery } from '@mui/material';
 import { brand, logos } from '@/theme/tokens';
@@ -6,8 +7,8 @@ import type { ThemeMode } from '@/theme/tokens';
 import { useApp } from './useApp';
 
 /**
- * Tela de entrada via SSO — sem formulário de login. O acesso sempre acontece a
- * partir do portal Atos Capital, que redireciona para aqui com o token assinado.
+ * Tela de entrada via SSO: o portal Atos Capital redireciona para aqui com o token assinado.
+ * Sem token, oferece o caminho para a tela de login por e-mail e senha.
  */
 export function Sso() {
   const { erro, semToken } = useApp();
@@ -45,10 +46,12 @@ export function Sso() {
               <Typography variant="h1" sx={{ fontSize: 20, mb: 1 }}>
                 Acesso pelo portal Atos Capital
               </Typography>
-              <Typography variant="body2" color="text.secondary">
-                Esta tela de suporte não tem login próprio. Acesse pelo portal Atos Capital — você será
-                redirecionado para cá automaticamente já autenticado.
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+                Acesse pelo portal Atos Capital para entrar automaticamente, ou use seu e-mail e senha.
               </Typography>
+              <Button component={RouterLink} to="/login" variant="contained" fullWidth sx={{ minHeight: 44 }}>
+                Entrar com e-mail e senha
+              </Button>
             </>
           )}
 

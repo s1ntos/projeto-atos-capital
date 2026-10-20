@@ -2,14 +2,15 @@ import { request, setToken } from './client';
 import type { TokenResponse, UsuarioLogado } from './types';
 
 /**
- * O backend hoje autentica só por e-mail (LoginDto só tem Email; ainda não valida senha).
- * Enviamos `senha` mesmo assim: campos desconhecidos no corpo são ignorados pelo model
- * binding do ASP.NET, então isso já deixa o front pronto para quando a validação chegar.
+ * Login por e-mail e senha. A API responde 401 com "E-mail ou senha inválidos." para qualquer
+ * falha de credencial e 429 quando o IP excede o limite de tentativas; os dois chegam aqui
+ * como ApiError (sem redirecionar, para o formulário mostrar a mensagem).
  */
 export async function login(email: string, senha: string): Promise<TokenResponse> {
   const resposta = await request<TokenResponse>('/api/Auth/login', {
     method: 'POST',
     body: { email, senha },
+    semRedirecionamento401: true,
   });
   setToken(resposta.token);
   return resposta;
@@ -27,6 +28,7 @@ export function sso(tokenPortal: string): Promise<TokenResponse> {
   return request<TokenResponse>('/api/Auth/sso', {
     method: 'POST',
     body: { token: tokenPortal },
+    semRedirecionamento401: true,
   });
 }
 

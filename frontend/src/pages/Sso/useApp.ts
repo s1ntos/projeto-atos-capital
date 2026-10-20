@@ -9,9 +9,9 @@ interface LocationState {
 }
 
 /**
- * Ponto de entrada único do sistema: o portal Atos Capital redireciona o usuário para
- * aqui com `?token=<jwt assinado pelo portal>`. Não existe formulário de login próprio
- * (ver decisão de arquitetura registrada no board Maestri "não deve ter tela de login").
+ * Entrada via portal Atos Capital: o portal redireciona o usuário para aqui com
+ * `?token=<jwt assinado pelo portal>`. A entrada padrão é a tela de login (/login);
+ * esta rota continua para quem vem autenticado do portal.
  */
 export function useApp() {
   const { login } = useAuth();

@@ -5,6 +5,7 @@ import * as yup from 'yup';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/auth/AuthContext';
 import { login as apiLogin } from '@/api/auth';
+import { ApiError } from '@/api/client';
 
 interface LoginValues {
   email: string;
@@ -18,6 +19,16 @@ const schema: yup.ObjectSchema<LoginValues> = yup.object({
 
 interface LocationState {
   from?: { pathname: string };
+}
+
+/** 401 → credenciais inválidas; 429 → limite de tentativas; 0 → sem conexão; resto → mensagem genérica. */
+function mensagemDeErro(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.status === 401) return 'E-mail ou senha inválidos';
+    if (err.status === 429) return 'Muitas tentativas. Aguarde um minuto e tente novamente.';
+    if (err.status === 0) return err.message;
+  }
+  return 'Não foi possível entrar. Tente novamente.';
 }
 
 export function useApp() {
@@ -41,8 +52,8 @@ export function useApp() {
       await login(token);
       const destino = (location.state as LocationState | null)?.from?.pathname ?? '/chamados';
       navigate(destino, { replace: true });
-    } catch {
-      setErro('E-mail ou senha inválidos');
+    } catch (err) {
+      setErro(mensagemDeErro(err));
     } finally {
       setEnviando(false);
     }

@@ -3,7 +3,8 @@ using backend.Enums;
 namespace backend.DTOs;
 
 public record LoginDto(
-    string Email
+    string Email,
+    string Senha
 );
 
 /// <summary>Token JWT assinado pelo portal Atos Capital, recebido via SSO (ver POST /api/Auth/sso).</summary>

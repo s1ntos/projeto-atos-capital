@@ -9,6 +9,8 @@ import { Chamados } from '@/pages/Chamados';
 import { ChamadoDetalhe } from '@/pages/ChamadoDetalhe';
 import { Relatorios } from '@/pages/Relatorios';
 import { Sso } from '@/pages/Sso';
+import { Login } from '@/pages/Login';
+import { EsqueciSenha } from '@/pages/EsqueciSenha';
 
 const routes = [
   { path: '/chamados', label: 'Chamados' },
@@ -58,6 +60,9 @@ export default function App() {
   return (
     <AuthProvider>
       <Routes>
+        {/* Telas públicas: login por e-mail e senha (entrada padrão) e SSO vindo do portal Atos Capital. */}
+        <Route path="/login" element={<Login />} />
+        <Route path="/esqueci-senha" element={<EsqueciSenha />} />
         <Route path="/sso" element={<Sso />} />
         <Route
           path="/*"

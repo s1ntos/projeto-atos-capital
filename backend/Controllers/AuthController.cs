@@ -2,9 +2,11 @@ using System.Security.Claims;
 using backend.Data.Repositories;
 using backend.DTOs;
 using backend.Models;
+using backend.Seguranca;
 using backend.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 
 namespace backend.Controllers;
@@ -13,28 +15,64 @@ namespace backend.Controllers;
 [Route("api/[controller]")]
 public class AuthController : ControllerBase
 {
+    /// <summary>Mensagem única para e-mail inexistente, senha errada e usuário sem senha (não revela quais e-mails existem).</summary>
+    public const string MensagemCredenciaisInvalidas = "E-mail ou senha inválidos.";
+
     private readonly IBaseRepository<Usuario> _usuarios;
     private readonly IBaseRepository<GrupoEmpresa> _grupos;
     private readonly AuthService _authService;
+    private readonly SenhaService _senhas;
+    private readonly ILogger<AuthController> _logger;
 
-    public AuthController(IBaseRepository<Usuario> usuarios, IBaseRepository<GrupoEmpresa> grupos, AuthService authService)
+    public AuthController(
+        IBaseRepository<Usuario> usuarios,
+        IBaseRepository<GrupoEmpresa> grupos,
+        AuthService authService,
+        SenhaService senhas,
+        ILogger<AuthController> logger)
     {
         _usuarios = usuarios;
         _grupos = grupos;
         _authService = authService;
+        _senhas = senhas;
+        _logger = logger;
     }
 
+    /// <summary>
+    /// Login por e-mail e senha. Responde 401 com a mesma mensagem para qualquer falha e 429 quando o IP
+    /// excede o limite de tentativas (ver LoginRateLimit).
+    /// </summary>
     [HttpPost("login")]
+    [EnableRateLimiting(LoginRateLimit.Politica)]
     public async Task<ActionResult<TokenResponseDto>> Login([FromBody] LoginDto dto)
     {
-        var usuario = await _usuarios.ObterTodos()
-            .FirstOrDefaultAsync(u => u.Email == dto.Email);
+        var email = NormalizarEmail(dto.Email);
+        var ip = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "desconhecido";
 
-        if (usuario == null)
+        if (string.IsNullOrEmpty(email) || string.IsNullOrEmpty(dto.Senha) || dto.Senha.Length > SenhaService.TamanhoMaximo)
         {
-            return Unauthorized("E-mail inválido.");
+            _logger.LogWarning("Login recusado (credenciais ausentes ou fora do tamanho) a partir de {Ip}", ip);
+            return Unauthorized(MensagemCredenciaisInvalidas);
         }
 
+        var usuario = await _usuarios.ObterTodos()
+            .FirstOrDefaultAsync(u => u.Email.ToLower() == email);
+
+        // Verificar sempre roda o hash (fictício quando não há usuário/senha) para manter o tempo de resposta uniforme.
+        var resultado = _senhas.Verificar(usuario, dto.Senha);
+        if (resultado == ResultadoVerificacaoSenha.Falha)
+        {
+            _logger.LogWarning("Login falhou para {Email} a partir de {Ip}", email, ip);
+            return Unauthorized(MensagemCredenciaisInvalidas);
+        }
+
+        if (resultado == ResultadoVerificacaoSenha.SucessoPrecisaRehash)
+        {
+            usuario!.SenhaHash = _senhas.GerarHash(usuario, dto.Senha);
+            usuario = await _usuarios.EditarESalvarAsync(usuario);
+        }
+
+        _logger.LogInformation("Login bem-sucedido do usuário {UsuarioId} a partir de {Ip}", usuario!.Id, ip);
         var token = _authService.GerarToken(usuario);
 
         return Ok(new TokenResponseDto(
@@ -108,4 +146,6 @@ public class AuthController : ControllerBase
             usuario.GrupoEmpresa.Nome
         ));
     }
+
+    public static string NormalizarEmail(string? email) => (email ?? string.Empty).Trim().ToLowerInvariant();
 }
